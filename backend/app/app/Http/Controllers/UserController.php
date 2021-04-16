@@ -8,6 +8,7 @@ use Prop\Core\Errors\ModelExists;
 use Prop\Core\Errors\ModelNotFound;
 use Prop\Services\Mailman\Mailman;
 use Prop\Services\Persistence\Database;
+use function Prop\Core\Cases\accept_invitation;
 use function Prop\Core\Cases\createAdmin;
 use function Prop\Core\Cases\forgotPassword;
 use function Prop\Core\Cases\login;
@@ -69,6 +70,20 @@ class UserController extends Controller {
         try {
             resetPassword($request->password, $request->token);
             return response('OK', Response::HTTP_OK);
+        } catch (ModelNotFound) {
+            return response('token already used', Response::HTTP_CONFLICT);
+        }
+    }
+
+    public function accept_invitation(Request $request, Mailman $mailman) {
+        try {
+            $user = accept_invitation($request->input('token'), (object)[
+                'first_name' => $request->input('first_name'),
+                'last_name' => $request->input('last_name'),
+                'password' => $request->input('password'),
+            ], $mailman);
+
+            return response()->json($user);
         } catch (ModelNotFound) {
             return response('token already used', Response::HTTP_CONFLICT);
         }

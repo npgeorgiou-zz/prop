@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Models\Invitation;
+use App\Models\Unit;
 use App\Models\User;
 use http\Exception\InvalidArgumentException;
 use Illuminate\Http\Response;
@@ -11,6 +13,7 @@ use Illuminate\Testing\TestResponse;
 use Prop\Core\Models\Role;
 use Prop\Services\Mailman\Mailman;
 use Tests\TestCase;
+use function PHPUnit\Framework\assertEquals;
 
 class ExampleTest extends TestCase {
     function mockService(string $name) {
@@ -121,14 +124,13 @@ class ExampleTest extends TestCase {
     }
 
     function test_create_association_needs_authentication() {
-        // No token
         $this->hitCreateAdmin();
 
-        $token = User::where('email', 'nikos@pap.com')->first()->remember_token;
+        // No token
         $response = $this->post('api/association/create', [
             'name' => 'Amazing association',
             'address' => 'Foovej 11, Barstrup',
-        ], ['token' => $token]);
+        ]);
         $this->assertResponseStatus(Response::HTTP_UNAUTHORIZED, $response);
 
         // Token but no user with this token
@@ -178,6 +180,308 @@ class ExampleTest extends TestCase {
             'name' => 'Amazing association',
             'address' => 'Foovej 11, Barstrup',
         ], ['token' => $token]);
+        $this->assertResponseStatus(Response::HTTP_CONFLICT, $response);
+    }
+
+    function test_create_unit_needs_authentication() {
+        $this->hitCreateAdmin();
+
+        // No token
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 A, Barstrup',
+        ]);
+        $this->assertResponseStatus(Response::HTTP_UNAUTHORIZED, $response);
+
+        // Token but no user with this token
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 A, Barstrup',
+        ], ['token' => 'jibberish']);
+        $this->assertResponseStatus(Response::HTTP_UNAUTHORIZED, $response);
+    }
+
+    function test_admin_can_create_units() {
+        $this->hitCreateAdmin();
+        $this->hitLogin(['password' => 'password']);
+
+        $token = User::where('email', 'nikos@pap.com')->first()->remember_token;
+
+        $this->post('api/association/create', [
+            'name' => 'Amazing association',
+            'address' => 'Foovej 11, Barstrup',
+        ], ['token' => $token]);
+
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 A, Barstrup',
+        ], ['token' => $token]);
+
+        $this->assertStatusOK($response);
+        $content = json_decode($response->getContent());
+        $this->assertEquals('Foovej 11 A, Barstrup', $content->address);
+
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 B, Barstrup',
+        ], ['token' => $token]);
+        $this->assertStatusOK($response);
+        $content = json_decode($response->getContent());
+        $this->assertEquals('Foovej 11 B, Barstrup', $content->address);
+    }
+
+    function test_admin_cant_create_units_with_same_address() {
+        $this->hitCreateAdmin();
+        $this->hitLogin(['password' => 'password']);
+
+        $token = User::where('email', 'nikos@pap.com')->first()->remember_token;
+
+        $this->post('api/association/create', [
+            'name' => 'Amazing association',
+            'address' => 'Foovej 11, Barstrup',
+        ], ['token' => $token]);
+
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 A, Barstrup',
+        ], ['token' => $token]);
+
+        $this->assertStatusOK($response);
+        $content = json_decode($response->getContent());
+        $this->assertEquals('Foovej 11 A, Barstrup', $content->address);
+
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 A, Barstrup',
+        ], ['token' => $token]);
+        $this->assertResponseStatus(Response::HTTP_CONFLICT, $response);
+    }
+
+    function test_can_attach_owners_to_units_needs_authentication() {
+        $this->hitCreateAdmin();
+
+        // No token
+        $response = $this->post('api/unit/assign-owner', [
+            'unit_id' => 1,
+            'email' => 'owner1@foo.com',
+        ]);
+        $this->assertResponseStatus(Response::HTTP_UNAUTHORIZED, $response);
+
+        // Token but no user with this token
+        $response = $this->post('api/unit/assign-owner', [
+            'unit_id' => 1,
+            'email' => 'owner1@foo.com',
+        ], ['token' => 'jibberish']);
+        $this->assertResponseStatus(Response::HTTP_UNAUTHORIZED, $response);
+    }
+
+    function test_admin_can_attach_owners_to_units() {
+        $this->hitCreateAdmin();
+        $this->hitLogin(['password' => 'password']);
+
+        $token = User::where('email', 'nikos@pap.com')->first()->remember_token;
+
+        $this->post('api/association/create', [
+            'name' => 'Amazing association',
+            'address' => 'Foovej 11, Barstrup',
+        ], ['token' => $token]);
+
+        // Attach unit to owner that doesnt exist...
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 A, Barstrup',
+        ], ['token' => $token]);
+        $unit_id = json_decode($response->getContent())->id;
+
+        // ...Assert email is sent
+        $mock = $this->mockService(Mailman::class);
+        $mock->shouldReceive('send')->once()->withSomeOfArgs(
+            'owner1@foo.com',
+            'emails.invite_owner',
+            'Come join',
+        );
+
+        $this->post('api/unit/assign-owner', [
+            'unit_id' => $unit_id,
+            'email' => 'owner1@foo.com',
+        ], ['token' => $token]);
+
+        // ...Assert user is created
+        $user = User::where('email', 'owner1@foo.com')->first();
+        $this->assertNotNull($user);
+
+        // ...Assert invitation is created
+        $this->assertNotNull(Invitation::where('user_id', $user->id)->first());
+
+        // ...Assert unit is attached
+        $this->assertTrue(Unit::find($unit_id)->owners->contains($user));
+
+        // Attach another unit to owner that exists but hasnt accepted invitations yet...
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 B, Barstrup',
+        ], ['token' => $token]);
+        $unit_id = json_decode($response->getContent())->id;
+
+        // ...Assert email is sent
+        $mock = $this->mockService(Mailman::class);
+        $mock->shouldReceive('send')->once()->withSomeOfArgs(
+            'owner1@foo.com',
+            'emails.invite_owner',
+            'Come join',
+        );
+
+        $this->post('api/unit/assign-owner', [
+            'unit_id' => $unit_id,
+            'email' => 'owner1@foo.com',
+        ], ['token' => $token]);
+
+        // ...Assert invitation is created
+        $invitation = Invitation::where('user_id', $user->id)->first();
+        $this->assertNotNull($invitation);
+
+        // ...Assert unit is attached
+        $this->assertTrue(Unit::find($unit_id)->owners->contains($user));
+
+        // Attach unit to owner that exists as a normal user...
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 C, Barstrup',
+        ], ['token' => $token]);
+        $unit_id = json_decode($response->getContent())->id;
+
+        // ...User accepts invitation
+        // ...Assert email is sent
+        $mock = $this->mockService(Mailman::class);
+        $mock->shouldReceive('send')->once()->withSomeOfArgs(
+            'owner1@foo.com',
+            'emails.welcome_owner',
+            'Welcome',
+        );
+
+        $this->post('api/user/accept-invitation', [
+            'token' => $invitation->token,
+            'first_name' => 'mickey',
+            'last_name' => 'mouse',
+            'password' => 'password',
+        ]);
+
+        // ...Assert email is sent
+        $mock = $this->mockService(Mailman::class);
+        $mock->shouldReceive('send')->once()->withSomeOfArgs(
+            'owner1@foo.com',
+            'emails.unit_assigned'
+        );
+
+        $this->post('api/unit/assign-owner', [
+            'unit_id' => $unit_id,
+            'email' => 'owner1@foo.com',
+        ], ['token' => $token]);
+
+        // ...Assert invitation is not created
+        $this->assertNull(Invitation::where('user_id', $user->id)->first());
+    }
+
+    function test_admin_can_attach_multiple_owners_to_multiple_unit() {
+    }
+
+    function test_owner_can_accept_invitation() {
+        $this->hitCreateAdmin();
+        $this->hitLogin(['password' => 'password']);
+
+        $token = User::where('email', 'nikos@pap.com')->first()->remember_token;
+
+        $this->post('api/association/create', [
+            'name' => 'Amazing association',
+            'address' => 'Foovej 11, Barstrup',
+        ], ['token' => $token]);
+
+        // Attach unit to owner that doesnt exist...
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 A, Barstrup',
+        ], ['token' => $token]);
+        $unit_id = json_decode($response->getContent())->id;
+
+        // ...Assert email is sent
+        $mock = $this->mockService(Mailman::class);
+        $mock->shouldReceive('send')->once()->withSomeOfArgs(
+            'owner1@foo.com',
+            'emails.invite_owner',
+            'Come join',
+        );
+
+        $this->post('api/unit/assign-owner', [
+            'unit_id' => $unit_id,
+            'email' => 'owner1@foo.com',
+        ], ['token' => $token]);
+
+        // Attach one more unit to the same owner...
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 B, Barstrup',
+        ], ['token' => $token]);
+        $unit_id = json_decode($response->getContent())->id;
+
+        // ...Assert email is sent
+        $mock = $this->mockService(Mailman::class);
+        $mock->shouldReceive('send')->once()->withSomeOfArgs(
+            'owner1@foo.com',
+            'emails.invite_owner',
+            'Come join',
+        );
+
+        $this->post('api/unit/assign-owner', [
+            'unit_id' => $unit_id,
+            'email' => 'owner1@foo.com',
+        ], ['token' => $token]);
+
+        // ...Assert invitations are created
+        $user = User::where('email', 'owner1@foo.com')->first();
+        $invitations = Invitation::where('user_id', $user->id)->get();
+        $this->assertCount(2, $invitations);
+
+        // User accepts invitation...
+        // ...Assert email is sent
+        $mock = $this->mockService(Mailman::class);
+        $mock->shouldReceive('send')->once()->withSomeOfArgs(
+            'owner1@foo.com',
+            'emails.welcome_owner',
+            'Welcome',
+        );
+
+        $response = $this->post('api/user/accept-invitation', [
+            'token' => $invitations[0]->token,
+            'first_name' => 'mickey',
+            'last_name' => 'mouse',
+            'password' => 'password',
+        ]);
+
+        // Assert  user is not dummy anymore
+        $content = json_decode($response->getContent());
+        $this->assertEquals('mickey', $content->first_name);
+        $this->assertEquals('mouse', $content->last_name);
+
+        // Assert all invitations are deleted
+        $this->assertNull(Invitation::where('user_id', $user->id)->first());
+    }
+
+    function test_cant_attach_same_unit_to_same_owner() {
+        $this->hitCreateAdmin();
+        $this->hitLogin(['password' => 'password']);
+
+        $token = User::where('email', 'nikos@pap.com')->first()->remember_token;
+
+        $this->post('api/association/create', [
+            'name' => 'Amazing association',
+            'address' => 'Foovej 11, Barstrup',
+        ], ['token' => $token]);
+
+        $response = $this->post('api/unit/create', [
+            'address' => 'Foovej 11 A, Barstrup',
+        ], ['token' => $token]);
+        $unit_id = json_decode($response->getContent())->id;
+
+
+        $this->post('api/unit/assign-owner', [
+            'unit_id' => $unit_id,
+            'email' => 'owner1@foo.com',
+        ], ['token' => $token]);
+
+        $response = $this->post('api/unit/assign-owner', [
+            'unit_id' => $unit_id,
+            'email' => 'owner1@foo.com',
+        ], ['token' => $token]);
+
         $this->assertResponseStatus(Response::HTTP_CONFLICT, $response);
     }
 }
